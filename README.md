@@ -96,14 +96,6 @@ Analyse statistique des rendements :
 * **Plotly** – visualisations interactives
 * **yfinance** – données financières
 * **SciPy** – statistiques
-## 🚀 Installation et exécution
-### 1️⃣ Cloner le projet
-
-```bash
-git clone https://github.com/votre-username/pro-quant-trader.git
-cd pro-quant-trader
----
-
 ## 📌 Inspirations
 
 * TradingView – analyse technique
