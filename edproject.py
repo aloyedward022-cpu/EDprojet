@@ -1,0 +1,122 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import yfinance as yf
+import datetime
+
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Pro-Quant Trader", layout="wide")
+
+# --- STYLE CSS POUR ÉPURER ---
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    div[data-testid="stMetricValue"] { 
+        font-size: 1.8rem; 
+        color: #00ff00; 
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- SIDEBAR ---
+st.sidebar.title("⚡ Terminal de Trading")
+actif = st.sidebar.text_input("Ticker (ex: BTC-USD, NVDA)", value="BTC-USD")
+
+col_d1, col_d2 = st.sidebar.columns(2)
+date_debut = col_d1.date_input("Début", value=datetime.datetime(2023, 1, 1))
+date_fin = col_d2.date_input("Fin", value=datetime.datetime.today())
+
+dict_freq = {"Daily": "1d", "Hourly": "1h", "5 min": "5m"}
+frequence = st.sidebar.selectbox("Timeframe", list(dict_freq.keys()))
+
+st.sidebar.divider()
+st.sidebar.subheader("🔧 Paramètres Stratégie")
+sma_fast = st.sidebar.slider("Moyenne Rapide", 5, 50, 20)
+sma_slow = st.sidebar.slider("Moyenne Lente", 20, 200, 50)
+frais_tx = st.sidebar.number_input("Frais / Trade (%)", 0.0, 1.0, 0.1)
+
+# --- ACQUISITION DES DONNÉES ---
+@st.cache_data(ttl=3600)
+def fetch_data(ticker, start, end, interval):
+    df = yf.download(ticker, start=start, end=end, interval=interval)
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+data = fetch_data(actif, date_debut, date_fin, dict_freq[frequence])
+
+if data is None or data.empty:
+    st.error("Données non disponibles. Vérifiez le ticker.")
+    st.stop()
+
+# --- INDICATEURS ---
+def apply_indicators(df):
+    df["SMA_F"] = df["Close"].rolling(sma_fast).mean()
+    df["SMA_S"] = df["Close"].rolling(sma_slow).mean()
+
+    std = df["Close"].rolling(20).std()
+    df["BB_up"] = df["SMA_F"] + 2 * std
+    df["BB_low"] = df["SMA_F"] - 2 * std
+
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    return df
+
+data = apply_indicators(data)
+
+# --- STRATÉGIE ---
+data["position"] = 0
+data.loc[(data["SMA_F"] > data["SMA_S"]) & (data["RSI"] < 70), "position"] = 1
+data["position"] = data["position"].shift(1).fillna(0)
+
+# --- BACKTEST ---
+data["returns"] = data["Close"].pct_change()
+data["strat_ret"] = data["position"] * data["returns"]
+data["trades"] = data["position"].diff().abs().fillna(0)
+data["strat_ret_net"] = data["strat_ret"] - data["trades"] * (frais_tx / 100)
+
+data["cum_bench"] = (1 + data["returns"].fillna(0)).cumprod()
+data["cum_strat"] = (1 + data["strat_ret_net"].fillna(0)).cumprod()
+
+# --- DASHBOARD ---
+st.header(f"📊 Performance : {actif}")
+m1, m2, m3, m4 = st.columns(4)
+
+total_ret = (data["cum_strat"].iloc[-1] - 1) * 100
+sharpe = (data["strat_ret_net"].mean() / data["strat_ret_net"].std()) * np.sqrt(252) if data["strat_ret_net"].std() != 0 else 0
+max_dd = ((data["cum_strat"] / data["cum_strat"].cummax()) - 1).min() * 100
+win_rate = (data[data["strat_ret_net"] > 0].shape[0] / data[data["trades"] > 0].shape[0]) * 100 if data[data["trades"] > 0].shape[0] > 0 else 0
+
+m1.metric("Rendement Net", f"{total_ret:.2f}%")
+m2.metric("Sharpe", f"{sharpe:.2f}")
+m3.metric("Max Drawdown", f"{max_dd:.2f}%")
+m4.metric("Win Rate", f"{win_rate:.1f}%")
+
+# --- GRAPHIQUE ---
+fig = go.Figure()
+
+fig.add_trace(go.Candlestick(
+    x=data.index,
+    open=data["Open"],
+    high=data["High"],
+    low=data["Low"],
+    close=data["Close"],
+    name="Prix",
+    opacity=0.4
+))
+
+fig.add_trace(go.Scatter(x=data.index, y=data["BB_up"], name="BB Haut"))
+fig.add_trace(go.Scatter(x=data.index, y=data["BB_low"], fill="tonexty", name="BB Bas"))
+
+fig.add_trace(go.Scatter(x=data.index, y=data["SMA_F"], name="SMA Rapide"))
+fig.add_trace(go.Scatter(x=data.index, y=data["SMA_S"], name="SMA Lente"))
+
+fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+st.plotly_chart(fig, use_container_width=True)
